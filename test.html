@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Fractal Quote Generator - Version 2 with Decode</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f9f9f9;
+    }
+    h1 { text-align: center; padding: 20px 0; }
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .controls, .preview {
+      box-sizing: border-box;
+      padding: 20px;
+      background: #fff;
+      margin: 10px;
+      border-radius: 5px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .controls { flex: 1 1 300px; max-width: 400px; }
+    .preview { flex: 1 1 300px; max-width: 650px; }
+    label, select, input, button {
+      display: block;
+      margin-bottom: 10px;
+      width: 100%;
+      font-size: 1em;
+    }
+    #codeDisplay {
+      font-weight: bold;
+      background: #eee;
+      padding: 5px;
+      display: block;
+      word-wrap: break-word;
+    }
+    canvas {
+      border: 1px solid #000;
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fractal Quote Generator - Version 2 with Decode</h1>
+  <div class="container">
+    <!-- Controls Section -->
+    <div class="controls">
+      <h2>Generate Fractal</h2>
+      <label for="quoteInput">Enter Your Quote:</label>
+      <input type="text" id="quoteInput" placeholder="Your favorite quote">
+      <button id="randomQuoteBtn">Random Quote</button>
+      
+      <label for="fractalType">Fractal Type:</label>
+      <select id="fractalType">
+        <option value="mandelbrot">Mandelbrot</option>
+        <option value="julia">Julia</option>
+        <option value="burningship">Burning Ship</option>
+      </select>
+      
+      <!-- Julia-specific options -->
+      <div id="juliaOptions" style="display:none;">
+        <label>Julia Constant (Real):
+          <input type="number" id="juliaReal" step="0.01" value="0.285">
+        </label>
+        <label>Julia Constant (Imag):
+          <input type="number" id="juliaImag" step="0.01" value="0.01">
+        </label>
+      </div>
+      
+      <label for="colorScheme">Color Scheme:</label>
+      <select id="colorScheme">
+        <option value="smoothRainbow">Smooth Rainbow</option>
+        <option value="smoothBlue">Smooth Blue</option>
+        <option value="grayscale">Grayscale</option>
+      </select>
+      
+      <button id="generateBtn">Generate Fractal</button>
+      <div>
+        Unique Code: <span id="codeDisplay">[None]</span>
+      </div>
+      
+      <!-- New: Code Decoding Box -->
+      <div>
+        <label for="codeInput">Enter Unique Code to Decode:</label>
+        <input type="text" id="codeInput" placeholder="Paste unique code here">
+        <button id="decodeBtn">Decode</button>
+        <div>Decoded Text: <span id="decodedText">[None]</span></div>
+      </div>
+    </div>
+    
+    <!-- Preview Section -->
+    <div class="preview">
+      <h2>Fractal Preview</h2>
+      <canvas id="fractalCanvas" width="600" height="600" aria-label="Fractal Preview"></canvas>
+    </div>
+  </div>
+  
+  <script>
+    // --- Default Fixed Parameters ---
+    const DEFAULT_ZOOM = 5.1;
+    const DEFAULT_ITERATIONS = 300;
+    const DEFAULT_OFFSET_REAL = -0.5;
+    const DEFAULT_OFFSET_IMAG = 0;
+    
+    // --- djb2 Hash Function ---
+    function djb2(str) {
+      let hash = 5381;
+      for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) + hash) + str.charCodeAt(i);
+        hash = hash & 0xffffffff; // 32-bit integer
+      }
+      return hash;
+    }
+    
+    // --- HSL to RGB Conversion ---
+    function hslToRgb(h, s, l) {
+      let r, g, b;
+      if (s == 0) {
+        r = g = b = l;
+      } else {
+        function hue2rgb(p, q, t) {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1/6) return p + (q - p) * 6 * t;
+          if (t < 1/2) return q;
+          if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+          return p;
+        }
+        let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        let p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+      }
+      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    }
+    
+    // --- Advanced Smooth Coloring ---
+    function getSmoothColor(iteration, maxIterations, zr, zi, colorScheme) {
+      if (iteration >= maxIterations) return [0, 0, 0];
+      let log_zn = Math.log(zr*zr + zi*zi) / 2;
+      let nu = Math.log(log_zn / Math.log(2)) / Math.log(2);
+      let smoothIteration = iteration + 1 - nu;
+      let norm = smoothIteration / maxIterations;
+      
+      if (colorScheme === "smoothRainbow") {
+        let hue = 360 * norm;
+        return hslToRgb(hue / 360, 1, 0.5);
+      } else if (colorScheme === "smoothBlue") {
+        return [0, 0, Math.floor(255 * norm)];
+      } else if (colorScheme === "grayscale") {
+        let gray = Math.floor(255 * norm);
+        return [gray, gray, gray];
+      }
+      return [0, 0, 0];
+    }
+    
+    // --- Compute Fractal Iteration for a Point ---
+    function computeFractalIteration(cx, cy, params) {
+      let iteration = 0;
+      const maxIterations = params.iterations;
+      let zr, zi;
+      if (params.fractalType === "julia") {
+        zr = cx; zi = cy;
+        cx = params.juliaReal; cy = params.juliaImag;
+      } else {
+        zr = 0; zi = 0;
+      }
+      
+      if (params.fractalType === "mandelbrot" || params.fractalType === "julia") {
+        while (zr*zr + zi*zi <= 4 && iteration < maxIterations) {
+          let temp = zr*zr - zi*zi + cx;
+          zi = 2*zr*zi + cy;
+          zr = temp;
+          iteration++;
+        }
+      } else if (params.fractalType === "burningship") {
+        while (zr*zr + zi*zi <= 4 && iteration < maxIterations) {
+          let temp = zr*zr - zi*zi + cx;
+          zi = Math.abs(2*zr*zi) + cy;
+          zr = Math.abs(temp);
+          iteration++;
+        }
+      }
+      return { iteration, zr, zi };
+    }
+    
+    // --- Main Fractal Generation Function ---
+    function generateFractal() {
+      const canvas = document.getElementById("fractalCanvas");
+      const ctx = canvas.getContext("2d");
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+      const imageData = ctx.createImageData(width, height);
+      const data = imageData.data;
+      
+      // Retrieve UI parameters.
+      const quote = document.getElementById("quoteInput").value;
+      const fractalType = document.getElementById("fractalType").value;
+      const colorScheme = document.getElementById("colorScheme").value;
+      const juliaReal = parseFloat(document.getElementById("juliaReal").value);
+      const juliaImag = parseFloat(document.getElementById("juliaImag").value);
+      
+      console.log("Generating fractal with parameters:", {
+        quote, fractalType, colorScheme, juliaReal, juliaImag,
+        DEFAULT_ZOOM, DEFAULT_ITERATIONS, DEFAULT_OFFSET_REAL, DEFAULT_OFFSET_IMAG
+      });
+      
+      // Generate unique code based on the quote.
+      const uniqueCode = btoa(encodeURIComponent(quote));
+      document.getElementById("codeDisplay").textContent = uniqueCode;
+      window.history.pushState({}, '', '?code=' + encodeURIComponent(uniqueCode));
+      
+      // Use the quote's hash to modify parameters more significantly.
+      const hashVal = djb2(quote);
+      // For offset, vary in range [-0.5, +0.5]
+      const modOffsetReal = ((hashVal % 1000) / 1000) - 0.5;
+      const modOffsetImag = (((Math.floor(hashVal / 1000)) % 1000) / 1000) - 0.5;
+      const effectiveOffsetReal = DEFAULT_OFFSET_REAL + modOffsetReal;
+      const effectiveOffsetImag = DEFAULT_OFFSET_IMAG + modOffsetImag;
+      
+      // For zoom, vary by a multiplier in the range [0.5, 1.5]
+      const modZoomFactor = (((Math.floor(hashVal / 1000000)) % 1000) / 1000) + 0.5;
+      const effectiveZoom = DEFAULT_ZOOM * modZoomFactor;
+      
+      // For iterations, vary by ±50.
+      const modIterations = Math.floor((((Math.floor(hashVal / 1000000000)) % 1000) / 1000) * 100 - 50);
+      const effectiveIterations = DEFAULT_ITERATIONS + modIterations;
+      
+      const params = {
+        fractalType,
+        iterations: effectiveIterations,
+        juliaReal,
+        juliaImag
+      };
+      
+      // Map canvas pixels to the complex plane using effective parameters.
+      const scale = 1 / effectiveZoom;
+      const reStart = effectiveOffsetReal - 2.0 * scale;
+      const reEnd   = effectiveOffsetReal + 2.0 * scale;
+      const imStart = effectiveOffsetImag - 1.5 * scale;
+      const imEnd   = effectiveOffsetImag + 1.5 * scale;
+      
+      for (let px = 0; px < width; px++) {
+        for (let py = 0; py < height; py++) {
+          const x0 = reStart + (px / width) * (reEnd - reStart);
+          const y0 = imStart + (py / height) * (imEnd - imStart);
+          const result = computeFractalIteration(x0, y0, params);
+          const iter = result.iteration;
+          const idx = 4 * (py * width + px);
+          if (iter >= effectiveIterations) {
+            data[idx] = data[idx+1] = data[idx+2] = 0;
+            data[idx+3] = 255;
+          } else {
+            const rgb = getSmoothColor(iter, effectiveIterations, result.zr, result.zi, colorScheme);
+            data[idx] = rgb[0];
+            data[idx+1] = rgb[1];
+            data[idx+2] = rgb[2];
+            data[idx+3] = 255;
+          }
+        }
+      }
+      
+      ctx.putImageData(imageData, 0, 0);
+    }
+    
+    // --- Event Listeners ---
+    document.getElementById("generateBtn").addEventListener("click", generateFractal);
+    
+    document.getElementById("randomQuoteBtn").addEventListener("click", function() {
+      const quotes = [
+        "The only limit to our realization of tomorrow is our doubts of today. - F.D. Roosevelt",
+        "In the middle of difficulty lies opportunity. - Albert Einstein",
+        "Life is what happens when you're busy making other plans. - John Lennon",
+        "The journey of a thousand miles begins with one step. - Lao Tzu",
+        "That which does not kill us makes us stronger. - Friedrich Nietzsche"
+      ];
+      const randomQuote = quotes[Math.floor(Math.random() * quotes.length)];
+      document.getElementById("quoteInput").value = randomQuote;
+      generateFractal();
+    });
+    
+    document.getElementById("fractalType").addEventListener("change", function() {
+      document.getElementById("juliaOptions").style.display = (this.value === "julia") ? "block" : "none";
+      generateFractal();
+    });
+    
+    // New: Decode Unique Code Functionality.
+    document.getElementById("decodeBtn").addEventListener("click", function() {
+      const code = document.getElementById("codeInput").value;
+      let decodedText;
+      try {
+        decodedText = decodeURIComponent(atob(code));
+      } catch (e) {
+        decodedText = "[Invalid code]";
+      }
+      document.getElementById("decodedText").textContent = decodedText;
+    });
+    
+    // On page load, check if a unique code is in the URL and update the quote.
+    window.addEventListener("load", function() {
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.has("code")) {
+        try {
+          const decoded = decodeURIComponent(atob(urlParams.get("code")));
+          document.getElementById("quoteInput").value = decoded;
+        } catch (e) {
+          console.error("Error decoding unique code:", e);
+        }
+      }
+      generateFractal();
+    });
+  </script>
+</body>
+</html>
